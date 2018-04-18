@@ -135,6 +135,6 @@ class GradientAnalyzer:
             hook.clear_stats()
         frame.set_index('word')
         with open(fname, 'w') as file:
-            frame.to_csv(file)
+            frame.to_csv(file, encoding='utf-8')
 
         self.running_count = torch.zeros(self.vocab_size)
