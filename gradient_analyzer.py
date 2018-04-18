@@ -2,6 +2,7 @@ import torch.nn as nn
 from collections import namedtuple
 import torch
 import pandas
+import numpy
 
 class AnalysisHook:
     def __init__(self, key, vocab_size, running_count):
@@ -13,7 +14,9 @@ class AnalysisHook:
             Stat('mean', lambda x: x.mean()),
             Stat('magnitude', lambda x: x.abs().max()),
             Stat('range', lambda x: x.max() - x.min()),
-            Stat('median', lambda x: x.median())
+            Stat('median', lambda x: x.median()),
+            Stat('variance', lambda x: x.var()),
+            Stat('median dispersion', lambda x: (x - x.median()).mean()),
         ]
 
         # TODO maybe find a more efficient way to do this with a pytorch buffer
@@ -42,18 +45,11 @@ class AnalysisHook:
                 word_grad = gradient[timestep]
                 word_idx = self.word_sequence[timestep]
 
-                old_count = self.running_count[word_idx] - 1
-
-                def update_mean(stat_idx):
-                    stat = self.stat_functions[stat_idx]
-
-                    old_stat = self.running_stats[word_idx][stat_idx]
-                    new_stat = stat.func(word_grad)
-
-                    return (old_stat * old_count + new_stat.cpu().data) / self.running_count[word_idx]
-
                 num_stats = len(self.stat_functions)
-                self.running_stats[word_idx] = torch.cat([update_mean(i) for i in range(num_stats)]).view(1, num_stats)
+                new_stats = torch.cat([self.stat_functions[i].func(word_grad) for i in range(num_stats)]).cpu().data
+
+                self.running_stats[word_idx] += new_stats
+                #TODO efficiency: do all word indices at once
 
     def register_hook(self, module):
         self.handle = module.register_backward_hook(self.store_stats)
@@ -69,6 +65,7 @@ class AnalysisHook:
         self.sequence_length = len(input_sequence)
 
     def serialize_stats(self):
+        self.running_stats /= self.running_count.view(-1, 1).expand_as(self.running_stats)
         frame = pandas.DataFrame(self.running_stats.numpy(), columns=[self.key + '_' + stat.name for stat in self.stat_functions])
         return frame
 
