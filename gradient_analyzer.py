@@ -3,25 +3,24 @@ from collections import namedtuple
 import torch
 import pandas
 import numpy
+from torch.autograd import Variable
 
 class AnalysisHook:
     def __init__(self, key, vocab_size, running_count):
         Stat = namedtuple('Stat', ['name', 'func'])
 
         self.stat_functions = [
-            Stat('l1', lambda x: x.norm(1)),
-            Stat('l2', lambda x: x.norm(2)),
-            Stat('mean', lambda x: x.mean()),
-            Stat('magnitude', lambda x: x.abs().max()),
-            Stat('range', lambda x: x.max() - x.min()),
-            Stat('median', lambda x: x.median()),
-            Stat('variance', lambda x: x.var()),
-            Stat('median dispersion', lambda x: (x - x.median()).mean()),
+            Stat('l1', lambda x: x.norm(1, dim=-1, keepdim=True)),
+            Stat('l2', lambda x: x.norm(2, dim=-1, keepdim=True)),
+            Stat('mean', lambda x: x.mean(dim=-1, keepdim=True)),
+            Stat('magnitude', lambda x: x.abs().max(dim=-1, keepdim=True)[0]),
+            Stat('range', lambda x: x.max(dim=-1, keepdim=True)[0] - x.min(dim=-1, keepdim=True)[0]),
+            Stat('median', lambda x: x.median(dim=-1, keepdim=True)[0]),
+            Stat('variance', lambda x: x.var(dim=-1, keepdim=True)),
         ]
 
-        # TODO maybe find a more efficient way to do this with a pytorch buffer
         self.running_count = running_count
-        self.running_stats = torch.zeros((vocab_size, len(self.stat_functions)))
+        self.running_stats = torch.cuda.FloatTensor(vocab_size, len(self.stat_functions)).fill_(0)
 
         self.key = key
         self.vocab_size = vocab_size
@@ -41,15 +40,9 @@ class AnalysisHook:
             if gradient is None or gradient.size(0) != self.sequence_length:
                 continue
 
-            for timestep in range(self.sequence_length):
-                word_grad = gradient[timestep]
-                word_idx = self.word_sequence[timestep]
-
-                num_stats = len(self.stat_functions)
-                new_stats = torch.cat([self.stat_functions[i].func(word_grad) for i in range(num_stats)]).cpu().data
-
-                self.running_stats[word_idx] += new_stats
-                #TODO efficiency: do all word indices at once
+            new_stats = torch.cat([stat.func(gradient.data) for stat in self.stat_functions], dim=1)
+            self.running_stats.index_add_(0, self.word_sequence, new_stats)
+            break
 
     def register_hook(self, module):
         self.handle = module.register_backward_hook(self.store_stats)
@@ -66,7 +59,7 @@ class AnalysisHook:
 
     def serialize_stats(self):
         self.running_stats /= self.running_count.view(-1, 1).expand_as(self.running_stats)
-        frame = pandas.DataFrame(self.running_stats.numpy(), columns=[self.key + '_' + stat.name for stat in self.stat_functions])
+        frame = pandas.DataFrame(self.running_stats.cpu().numpy(), columns=[self.key + '_' + stat.name for stat in self.stat_functions])
         return frame
 
 class GradientAnalyzer:
@@ -85,7 +78,8 @@ class GradientAnalyzer:
                 break
         if self.vocab_size is None:
             raise Exception('no embedding layer')
-        self.running_count = torch.zeros(self.vocab_size)
+        self.running_count = torch.cuda.FloatTensor(self.vocab_size).fill_(0)
+
 
     @staticmethod
     def module_output_size(module):
@@ -111,10 +105,10 @@ class GradientAnalyzer:
             self.add_hooks_recursively(module, prefix=module_key)
 
     def set_word_sequence(self, module, input, output):
-        sequence = input[0][:,0].cpu().data
+        sequence = input[0][:,0].data
         for key, hook in self.hooks.items():
             hook.set_word_sequence(sequence)
-        self.running_count.index_add_(0, sequence, torch.ones(len(sequence)))
+        self.running_count.index_add_(0, sequence, torch.cuda.FloatTensor([1]).expand_as(sequence))
 
     def add_hooks_to_model(self):
         self.add_hooks_recursively(self.model)
@@ -128,13 +122,13 @@ class GradientAnalyzer:
     def compute_and_clear(self, idx2word, fname):
         print('printing final statistics to ', fname)
         frame = pandas.DataFrame(idx2word, columns=['word'])
-        frame['total_count'] = pandas.Series(self.running_count.numpy(), index=frame.index)
+        frame['total_count'] = pandas.Series(self.running_count.cpu().numpy(), index=frame.index)
 
         for key, hook in self.hooks.items():
             frame = pandas.concat([frame, hook.serialize_stats()], axis=1, join_axes=[frame.index])
             hook.clear_stats()
         frame.set_index('word')
         with open(fname, 'w') as file:
-            frame.to_csv(file)
+            frame.to_csv(file, encoding='utf-8')
 
-        self.running_count = torch.zeros(self.vocab_size)
+        self.running_count = torch.cuda.FloatTensor(self.vocab_size).fill_(0)
