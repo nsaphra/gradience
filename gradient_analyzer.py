@@ -40,7 +40,7 @@ class AnalysisHook:
             if gradient is None or gradient.size(0) != self.sequence_length:
                 continue
 
-            new_stats = torch.cat([stat.func(gradient.data) for stat in self.stat_functions], dim=1)
+            new_stats = torch.stack([stat.func(gradient.data).view_as(self.word_sequence) for stat in self.stat_functions], dim=1)
             self.running_stats.index_add_(0, self.word_sequence, new_stats)
             break
 
@@ -53,9 +53,9 @@ class AnalysisHook:
     def clear_stats(self):
         self.running_stats = torch.zeros((self.vocab_size, len(self.stat_functions)))
 
-    def set_word_sequence(self, input_sequence):
+    def set_word_sequence(self, input_sequence, sequence_length):
         self.word_sequence = input_sequence
-        self.sequence_length = len(input_sequence)
+        self.sequence_length = sequence_length
 
     def serialize_stats(self):
         self.running_stats /= self.running_count.view(-1, 1).expand_as(self.running_stats)
@@ -105,10 +105,13 @@ class GradientAnalyzer:
             self.add_hooks_recursively(module, prefix=module_key)
 
     def set_word_sequence(self, module, input, output):
-        sequence = input[0][:,0].data
+        sequence = input[0].data
+        unrolled_sequence = sequence.view(-1)
+        sequence_length = sequence.size(0)
+        increment = torch.cuda.FloatTensor([1])
         for key, hook in self.hooks.items():
-            hook.set_word_sequence(sequence)
-        self.running_count.index_add_(0, sequence, torch.cuda.FloatTensor([1]).expand_as(sequence))
+            hook.set_word_sequence(unrolled_sequence, sequence_length)
+        self.running_count.index_add_(0, unrolled_sequence, increment.expand_as(unrolled_sequence))
 
     def add_hooks_to_model(self):
         self.add_hooks_recursively(self.model)
