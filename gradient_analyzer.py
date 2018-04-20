@@ -6,18 +6,26 @@ import numpy
 from torch.autograd import Variable
 
 class AnalysisHook:
-    def __init__(self, key, vocab_size, running_count):
+    def __init__(self, key, vocab_size, running_count,
+                 l1=False, l2=False, mean=False, magnitude=False, range=False, median=False, variance=False):
         Stat = namedtuple('Stat', ['name', 'func'])
 
-        self.stat_functions = [
-            Stat('l1', lambda x: x.norm(1, dim=-1, keepdim=True)),
-            Stat('l2', lambda x: x.norm(2, dim=-1, keepdim=True)),
-            Stat('mean', lambda x: x.mean(dim=-1, keepdim=True)),
-            Stat('magnitude', lambda x: x.abs().max(dim=-1, keepdim=True)[0]),
-            Stat('range', lambda x: x.max(dim=-1, keepdim=True)[0] - x.min(dim=-1, keepdim=True)[0]),
-            Stat('median', lambda x: x.median(dim=-1, keepdim=True)[0]),
-            Stat('variance', lambda x: x.var(dim=-1, keepdim=True)),
-        ]
+        self.stat_functions = []
+
+        if l1:
+            self.stat_functions.append(Stat('l1', lambda x: x.norm(1, dim=-1, keepdim=True)))
+        if l2:
+            self.stat_functions.append(Stat('l2', lambda x: x.norm(2, dim=-1, keepdim=True)))
+        if mean:
+            self.stat_functions.append(Stat('mean', lambda x: x.mean(dim=-1, keepdim=True)))
+        if magnitude:
+            self.stat_functions.append(Stat('magnitude', lambda x: x.abs().max(dim=-1, keepdim=True)[0]))
+        if range:
+            self.stat_functions.append(Stat('range', lambda x: x.max(dim=-1, keepdim=True)[0] - x.min(dim=-1, keepdim=True)[0]))
+        if median:
+            self.stat_functions.append(Stat('median', lambda x: x.median(dim=-1, keepdim=True)[0]))
+        if variance:
+            self.stat_functions.append(Stat('variance', lambda x: x.var(dim=-1, keepdim=True)))
 
         self.running_count = running_count
         self.running_stats = torch.cuda.FloatTensor(vocab_size, len(self.stat_functions)).fill_(0)
@@ -68,7 +76,8 @@ class GradientAnalyzer:
     out at different points
     hooks are the analysis hook handles
     """
-    def __init__(self, model):
+    def __init__(self, model,
+                 l1=False, l2=False, mean=False, magnitude=False, range=False, median=False, variance=False):
         self.model = model
         self.hooks = {}
         for module in model.modules():
@@ -80,6 +89,13 @@ class GradientAnalyzer:
             raise Exception('no embedding layer')
         self.running_count = torch.cuda.FloatTensor(self.vocab_size).fill_(0)
 
+        self.l1 = l1
+        self.l2 = l2
+        self.mean = mean
+        self.magnitude = magnitude
+        self.range = range
+        self.median = median
+        self.variance = variance
 
     @staticmethod
     def module_output_size(module):
@@ -99,7 +115,8 @@ class GradientAnalyzer:
             output_size = self.module_output_size(module)
             if output_size == 0:
                 continue
-            self.hooks[module_key] = AnalysisHook(module_key, self.vocab_size, self.running_count)
+            self.hooks[module_key] = AnalysisHook(module_key, self.vocab_size, self.running_count,
+            l1=self.l1, l2=self.l2, mean=self.mean, magnitude=self.magnitude, range=self.range, median=self.median, variance=self.variance)
 
             self.hooks[module_key].register_hook(module)
             self.add_hooks_recursively(module, prefix=module_key)

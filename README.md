@@ -9,7 +9,7 @@ from gradient_analyzer import GradientAnalyzer
 
 ...
 
-analyzer = GradientAnalyzer(model)
+analyzer = GradientAnalyzer(model, l1=True, l2=True, variance=True)
 analyzer.add_hooks_to_model()
 
 for sample in corpus:
