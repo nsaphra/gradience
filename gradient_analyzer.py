@@ -1,5 +1,5 @@
 import torch.nn as nn
-from collections import namedtuple
+from collections import namedtuple, defaultdict
 import torch
 import pandas
 import numpy
@@ -28,7 +28,7 @@ class AnalysisHook:
             self.stat_functions.append(Stat('variance', lambda x: x.var(dim=-1, keepdim=True)))
 
         self.running_count = running_count
-        self.running_stats = torch.cuda.FloatTensor(vocab_size, len(self.stat_functions)).fill_(0)
+        self.running_stats = defaultdict(lambda : torch.cuda.FloatTensor(vocab_size, len(self.stat_functions)).fill_(0))
 
         self.key = key
         self.vocab_size = vocab_size
@@ -45,12 +45,19 @@ class AnalysisHook:
 
     def store_stats(self, module, grad_input, grad_output):
         for gradient_idx, gradient in enumerate(grad_input):
-            if gradient is None or gradient.size(0) != self.sequence_length:
+            if gradient is None:
                 continue
 
-            new_stats = torch.stack([stat.func(gradient.data).view_as(self.word_sequence) for stat in self.stat_functions], dim=1)
-            self.running_stats.index_add_(0, self.word_sequence, new_stats)
-            break
+            if gradient.dim() == 3 and (gradient.size(0) * gradient.size(1)) == (self.word_sequence.size(0)):
+                # gradient: sequence_length x batch_size x hidden_size
+                gradient = gradient.view(self.word_sequence.size(0), -1)
+            elif gradient.size(0) is not self.word_sequence.size(0):
+                continue
+            # gradient: (sequence_length * batch_size) x hidden_size
+
+            new_stats = torch.stack([stat.func(gradient.data) for stat in self.stat_functions], dim=1)
+            # new_stats: (sequence_length * batch_size) x num_stats
+            self.running_stats[gradient_idx].index_add_(0, self.word_sequence, new_stats)
 
     def register_hook(self, module):
         self.handle = module.register_backward_hook(self.store_stats)
@@ -66,8 +73,12 @@ class AnalysisHook:
         self.sequence_length = sequence_length
 
     def serialize_stats(self):
-        self.running_stats /= self.running_count.view(-1, 1).expand_as(self.running_stats)
-        frame = pandas.DataFrame(self.running_stats.cpu().numpy(), columns=[self.key + '_' + stat.name for stat in self.stat_functions])
+        frame = pandas.DataFrame()
+        for i, layer_stats in self.running_stats.items():
+            layer_stats /= self.running_count.view(-1, 1).expand_as(layer_stats)
+            frame = pandas.concat([frame,
+                           pandas.DataFrame(layer_stats.cpu().numpy(), columns=['_'.join([self.key, str(i), stat.name]) for stat in self.stat_functions])],
+                          axis=1)
         return frame
 
 class GradientAnalyzer:
@@ -116,7 +127,7 @@ class GradientAnalyzer:
             if output_size == 0:
                 continue
             self.hooks[module_key] = AnalysisHook(module_key, self.vocab_size, self.running_count,
-            l1=self.l1, l2=self.l2, mean=self.mean, magnitude=self.magnitude, range=self.range, median=self.median, variance=self.variance)
+                l1=self.l1, l2=self.l2, mean=self.mean, magnitude=self.magnitude, range=self.range, median=self.median, variance=self.variance)
 
             self.hooks[module_key].register_hook(module)
             self.add_hooks_recursively(module, prefix=module_key)
